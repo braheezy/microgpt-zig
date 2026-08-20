@@ -23,9 +23,42 @@ pub fn main(init: std.process.Init) !void {
         try loadDataset(io, "data/names.txt");
     }
 
-    std.debug.print("number of names: {d}\n", .{num_docs});
+    var doc_order = try arena.alloc(usize, num_docs);
+    for (0..num_docs) |i| {
+        doc_order[i] = i;
+    }
+
+    shuffleInts(doc_order);
+    const docs_tmp = try arena.alloc([MAX_DOC_LEN]u8, num_docs);
+    for (0..num_docs) |i| {
+        @memcpy(docs_tmp[i][0..], docs[doc_order[i]][0..]);
+    }
+    @memcpy(docs[0..num_docs], docs_tmp[0..num_docs]);
+    arena.free(docs_tmp);
+    arena.free(doc_order);
+    std.debug.print("num docs: {d}\n", .{num_docs});
 }
 
+var rng_state: u64 = 42;
+
+fn rngNext() u64 {
+    rng_state ^= rng_state << 13;
+    rng_state ^= rng_state >> 7;
+    rng_state ^= rng_state << 17;
+    return rng_state;
+}
+fn rngUniform() f64 {
+    return @as(f64, @floatFromInt((rngNext() >> 11))) * (1.0 / 9007199254740992.0);
+}
+fn shuffleInts(arr: []usize) void {
+    var n = arr.len - 1;
+    while (n > 0) : (n -= 1) {
+        const j: usize = @intFromFloat(rngUniform() * @as(f64, @floatFromInt(n + 1)));
+        const tmp = arr[n];
+        arr[n] = arr[j];
+        arr[j] = tmp;
+    }
+}
 fn loadDataset(io: Io, filename: []const u8) !void {
     const file = try Io.Dir.cwd().openFile(io, filename, .{});
     defer file.close(io);

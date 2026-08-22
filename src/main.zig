@@ -988,15 +988,7 @@ fn dot4(x: []const f32, y: []const f32) f32 {
     return @reduce(.Add, xv * yv);
 }
 fn mv16Blk16(x: []const f32, wcol: []const f32, ldw: usize, out: []f32) void {
-    for (0..N_EMBED) |r| {
-        var sum: f32 = 0.0;
-
-        for (0..N_EMBED) |c| {
-            sum += x[c] * wcol[c * ldw + r];
-        }
-
-        out[r] = sum;
-    }
+    mvPackedSimd(x, wcol, N_EMBED, N_EMBED, ldw, out);
 }
 fn mvPacked(
     x: []const f32,
@@ -1006,13 +998,45 @@ fn mvPacked(
     ldw: usize,
     out: []f32,
 ) void {
-    for (0..nout) |r| {
-        var sum: f32 = 0.0;
+    mvPackedSimd(x, wcol, nin, nout, ldw, out);
+}
 
+// Matrix-vector multiply for column-packed weights:
+// wcol[c * ldw + r] is the weight from input c to output r.
+// Accumulating four output rows at a time maps directly to SIMD without
+// requiring architecture-specific intrinsics.
+fn mvPackedSimd(
+    x: []const f32,
+    wcol: []const f32,
+    nin: usize,
+    nout: usize,
+    ldw: usize,
+    out: []f32,
+) void {
+    const V = @Vector(4, f32);
+    var r: usize = 0;
+
+    while (r + 4 <= nout) : (r += 4) {
+        var acc: V = @splat(0.0);
+
+        for (0..nin) |c| {
+            const wv: V = .{
+                wcol[c * ldw + r + 0],
+                wcol[c * ldw + r + 1],
+                wcol[c * ldw + r + 2],
+                wcol[c * ldw + r + 3],
+            };
+            acc += @as(V, @splat(x[c])) * wv;
+        }
+
+        out[r..][0..4].* = acc;
+    }
+
+    while (r < nout) : (r += 1) {
+        var sum: f32 = 0.0;
         for (0..nin) |c| {
             sum += x[c] * wcol[c * ldw + r];
         }
-
         out[r] = sum;
     }
 }
@@ -1026,13 +1050,14 @@ fn mvFc1(
     out: []f32,
 ) void {
     for (0..MLP_DIM / 16) |block| {
-        for (0..16) |r| {
-            var sum: f32 = 0.0;
-            for (0..N_EMBED) |c| {
-                sum += x[c] * w[block * 256 + c * 16 + r];
-            }
-            out[block * 16 + r] = sum;
-        }
+        mvPackedSimd(
+            x,
+            w[block * 256 ..][0..256],
+            N_EMBED,
+            16,
+            16,
+            out[block * 16 ..][0..16],
+        );
     }
 }
 

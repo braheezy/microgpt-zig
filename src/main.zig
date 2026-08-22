@@ -252,8 +252,47 @@ pub fn main(init: std.process.Init) !void {
                 len += 1;
             }
         }
-        std.debug.print("sample: {d:2}: {s}\n", .{ si + 1, buf });
+        std.debug.print("sample {d:0>2}: {s}\n", .{ si + 1, buf });
+
+        @memset(std.mem.asBytes(&kv_keys), 0);
+        @memset(std.mem.asBytes(&kv_vals), 0);
     }
+    const N: usize = 5_000_000;
+
+    var emitted: usize = 0;
+    var tok: usize = BOS;
+    var pos: usize = 0;
+
+    const t0 = std.Io.Timestamp.now(io, .awake);
+
+    var logits: [LM_PAD_MAX]f32 = undefined;
+
+    for (0..N) |_| {
+        if (pos >= BLOCK_SIZE) {
+            pos = 0;
+        }
+
+        gptForwardInfer(tok, pos, logits[0..]);
+
+        const next = sampleLogits(logits[0..], vocab_size, lm_pad_global, inv_t);
+
+        if (next == BOS) {
+            tok = BOS;
+            pos = 0;
+        } else {
+            tok = next;
+            pos += 1;
+        }
+
+        emitted += 1;
+    }
+
+    const t1 = std.Io.Timestamp.now(io, .awake);
+    const elapsed_ns = t1.nanoseconds - t0.nanoseconds;
+    const elapsed_s: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
+    const tok_per_sec: f64 = @as(f64, @floatFromInt(emitted)) / elapsed_s;
+
+    std.debug.print("  zig fp32 {d:14.0} tok/sec\n", .{tok_per_sec});
 }
 
 var ucharsArray: [MAX_CHARS]u8 = undefined;

@@ -303,7 +303,7 @@ var vocab_size: usize = 0;
 fn inferPackWeights(allocator: Allocator) !void {
     const lm_pad = ((vocab_size + 3) / 4) * 4;
     lm_pad_global = lm_pad;
-    for (0..N_LAYER) |li| {
+    inline for (0..N_LAYER) |li| {
         packT(attn_wq[li], &iw_q[li], N_EMBED, N_EMBED);
         packT(attn_wk[li], &iw_k[li], N_EMBED, N_EMBED);
         packT(attn_wv[li], &iw_v[li], N_EMBED, N_EMBED);
@@ -425,7 +425,7 @@ fn gptForward(
 
         var ao: [N_EMBED]f32 = undefined;
         for (0..N_EMBED) |j| ao[j] = 0.0;
-        for (0..N_HEAD) |h| {
+        inline for (0..N_HEAD) |h| {
             const hs = h * HEAD_DIM;
             var al: [BLOCK_SIZE]f32 = undefined;
 
@@ -490,6 +490,7 @@ fn gptForward(
     linearForward(&x, lm_head, vocab_size, N_EMBED, logits_out);
 }
 fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
+    @setRuntimeSafety(false);
     var x: [N_EMBED]f32 = undefined;
     var xn: [N_EMBED]f32 = undefined;
     var xin: [N_EMBED]f32 = undefined;
@@ -498,7 +499,7 @@ fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
     var v: [N_EMBED]f32 = undefined;
     var ao: [N_EMBED]f32 = undefined;
 
-    for (0..N_LAYER) |li| {
+    inline for (0..N_LAYER) |li| {
         var xin_p: []const f32 = undefined;
 
         if (li == 0) {
@@ -530,35 +531,46 @@ fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
 
         @memset(ao[0..], 0);
 
-        for (0..N_HEAD) |h| {
+        var scores: [BLOCK_SIZE]Vec4 = undefined;
+        var mx: Vec4 = @splat(-3.0e38);
+
+        for (0..seq_len) |tt| {
+            const kt = kv_keys[li][tt];
+            const sv: Vec4 = .{
+                dot4(q[0..4], kt[0..4]) * scale,
+                dot4(q[4..8], kt[4..8]) * scale,
+                dot4(q[8..12], kt[8..12]) * scale,
+                dot4(q[12..16], kt[12..16]) * scale,
+            };
+            scores[tt] = sv;
+            mx = @max(mx, sv);
+        }
+
+        var sum: Vec4 = @splat(0.0);
+        for (0..seq_len) |tt| {
+            const ev = fastExp4(scores[tt] - mx);
+            scores[tt] = ev;
+            sum += ev;
+        }
+
+        const inv: Vec4 = @as(Vec4, @splat(1.0)) / sum;
+        var ao_vec: [N_HEAD]Vec4 = .{
+            @splat(0.0), @splat(0.0), @splat(0.0), @splat(0.0),
+        };
+
+        for (0..seq_len) |tt| {
+            const weights = scores[tt] * inv;
+            const vv = kv_vals[li][tt];
+            inline for (0..N_HEAD) |h| {
+                const hs = h * HEAD_DIM;
+                const value: Vec4 = vv[hs..][0..HEAD_DIM].*;
+                ao_vec[h] = @mulAdd(Vec4, @splat(weights[h]), value, ao_vec[h]);
+            }
+        }
+
+        inline for (0..N_HEAD) |h| {
             const hs = h * HEAD_DIM;
-            var scores: [BLOCK_SIZE]f32 = undefined;
-
-            for (0..seq_len) |tt| {
-                scores[tt] =
-                    dot4(q[hs..][0..HEAD_DIM], kv_keys[li][tt][hs..][0..HEAD_DIM]) * scale;
-            }
-
-            var mx = scores[0];
-            for (1..seq_len) |tt| {
-                if (scores[tt] > mx) mx = scores[tt];
-            }
-
-            var sum: f32 = 0.0;
-            for (0..seq_len) |tt| {
-                scores[tt] = std.math.exp(scores[tt] - mx);
-                sum += scores[tt];
-            }
-
-            const inv = 1.0 / sum;
-
-            for (0..seq_len) |tt| {
-                const weight = scores[tt] * inv;
-
-                for (0..HEAD_DIM) |j| {
-                    ao[hs + j] += weight * kv_vals[li][tt][hs + j];
-                }
-            }
+            ao[hs..][0..HEAD_DIM].* = ao_vec[h];
         }
 
         var wo: [N_EMBED]f32 = undefined;
@@ -576,19 +588,14 @@ fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
 
         mvFc1(x[0..], iw_fc1[li][0..], h1[0..]);
 
-        for (0..MLP_DIM) |i| {
-            const relu = @max(h1[i], 0.0);
-            h2[i] = relu * relu;
+        for (0..MLP_DIM / 4) |block| {
+            const base = block * 4;
+            const hv: Vec4 = h1[base..][0..4].*;
+            const relu: Vec4 = @max(hv, @as(Vec4, @splat(0.0)));
+            h2[base..][0..4].* = relu * relu;
         }
 
-        mvPacked(
-            h2[0..],
-            iw_fc2[li][0..],
-            MLP_DIM,
-            N_EMBED,
-            N_EMBED,
-            mlp_out[0..],
-        );
+        mvFc2(h2[0..], iw_fc2[li][0..], mlp_out[0..]);
 
         const scale2 = mlp_scale * mlp_scale;
         for (0..N_EMBED) |i| {
@@ -981,6 +988,18 @@ fn packT(src: []const f32, dst: []f32, nout: usize, nin: usize) void {
 // Land O' SIMD
 const Vec = @Vector(N_EMBED, f32);
 const Vec4 = @Vector(4, f32);
+const IntVec4 = @Vector(4, i32);
+
+// Fast four-wide exponential approximation used by the C implementation's
+// vfexpq. It is intentionally approximate; it is suitable for softmax where
+// the logits are stabilized by subtracting their maximum first.
+fn fastExp4(x: Vec4) Vec4 {
+    const scale: Vec4 = @splat(12102203.1615614 * 1.4426950408);
+    const bias: IntVec4 = @splat(1065353216);
+    const y = x * scale;
+    const i: IntVec4 = @intFromFloat(@round(y));
+    return @bitCast(i + bias);
+}
 
 fn dot4(x: []const f32, y: []const f32) f32 {
     const xv: Vec4 = x[0..4].*;
@@ -988,7 +1007,30 @@ fn dot4(x: []const f32, y: []const f32) f32 {
     return @reduce(.Add, xv * yv);
 }
 fn mv16Blk16(x: []const f32, wcol: []const f32, ldw: usize, out: []f32) void {
-    mvPackedSimd(x, wcol, N_EMBED, N_EMBED, ldw, out);
+    @setRuntimeSafety(false);
+    const V = @Vector(4, f32);
+    var a0: V = @splat(0.0);
+    var a1: V = @splat(0.0);
+    var a2: V = @splat(0.0);
+    var a3: V = @splat(0.0);
+
+    inline for (0..N_EMBED) |c| {
+        const xv: V = @splat(x[c]);
+        const base = c * ldw;
+        const w0: V = .{ wcol[base], wcol[base + 1], wcol[base + 2], wcol[base + 3] };
+        const w1: V = .{ wcol[base + 4], wcol[base + 5], wcol[base + 6], wcol[base + 7] };
+        const w2: V = .{ wcol[base + 8], wcol[base + 9], wcol[base + 10], wcol[base + 11] };
+        const w3: V = .{ wcol[base + 12], wcol[base + 13], wcol[base + 14], wcol[base + 15] };
+        a0 = @mulAdd(V, xv, w0, a0);
+        a1 = @mulAdd(V, xv, w1, a1);
+        a2 = @mulAdd(V, xv, w2, a2);
+        a3 = @mulAdd(V, xv, w3, a3);
+    }
+
+    out[0..4].* = a0;
+    out[4..8].* = a1;
+    out[8..12].* = a2;
+    out[12..16].* = a3;
 }
 fn mvPacked(
     x: []const f32,
@@ -1013,6 +1055,7 @@ fn mvPackedSimd(
     ldw: usize,
     out: []f32,
 ) void {
+    @setRuntimeSafety(false);
     const V = @Vector(4, f32);
     var r: usize = 0;
 
@@ -1026,7 +1069,7 @@ fn mvPackedSimd(
                 wcol[c * ldw + r + 2],
                 wcol[c * ldw + r + 3],
             };
-            acc += @as(V, @splat(x[c])) * wv;
+            acc = @mulAdd(V, @as(V, @splat(x[c])), wv, acc);
         }
 
         out[r..][0..4].* = acc;
@@ -1049,16 +1092,66 @@ fn mvFc1(
     w: []const f32,
     out: []f32,
 ) void {
+    @setRuntimeSafety(false);
+    const V = @Vector(4, f32);
+
     for (0..MLP_DIM / 16) |block| {
-        mvPackedSimd(
-            x,
-            w[block * 256 ..][0..256],
-            N_EMBED,
-            16,
-            16,
-            out[block * 16 ..][0..16],
-        );
+        var a0: V = @splat(0.0);
+        var a1: V = @splat(0.0);
+        var a2: V = @splat(0.0);
+        var a3: V = @splat(0.0);
+        const block_base = block * 256;
+
+        inline for (0..N_EMBED) |c| {
+            const xv: V = @splat(x[c]);
+            const base = block_base + c * 16;
+            const w0: V = .{ w[base], w[base + 1], w[base + 2], w[base + 3] };
+            const w1: V = .{ w[base + 4], w[base + 5], w[base + 6], w[base + 7] };
+            const w2: V = .{ w[base + 8], w[base + 9], w[base + 10], w[base + 11] };
+            const w3: V = .{ w[base + 12], w[base + 13], w[base + 14], w[base + 15] };
+            a0 = @mulAdd(V, xv, w0, a0);
+            a1 = @mulAdd(V, xv, w1, a1);
+            a2 = @mulAdd(V, xv, w2, a2);
+            a3 = @mulAdd(V, xv, w3, a3);
+        }
+
+        const dst = block * 16;
+        out[dst..][0..4].* = a0;
+        out[dst + 4 ..][0..4].* = a1;
+        out[dst + 8 ..][0..4].* = a2;
+        out[dst + 12 ..][0..4].* = a3;
     }
+}
+
+fn mvFc2(
+    x: []const f32,
+    w: []const f32,
+    out: []f32,
+) void {
+    @setRuntimeSafety(false);
+    const V = @Vector(4, f32);
+    var a0: V = @splat(0.0);
+    var a1: V = @splat(0.0);
+    var a2: V = @splat(0.0);
+    var a3: V = @splat(0.0);
+
+    inline for (0..MLP_DIM) |c| {
+        const xv: V = @splat(x[c]);
+        const base = c * N_EMBED;
+        const w0: V = .{ w[base], w[base + 1], w[base + 2], w[base + 3] };
+        const w1: V = .{ w[base + 4], w[base + 5], w[base + 6], w[base + 7] };
+        const w2: V = .{ w[base + 8], w[base + 9], w[base + 10], w[base + 11] };
+        const w3: V = .{ w[base + 12], w[base + 13], w[base + 14], w[base + 15] };
+        a0 = @mulAdd(V, xv, w0, a0);
+        a1 = @mulAdd(V, xv, w1, a1);
+        a2 = @mulAdd(V, xv, w2, a2);
+        a3 = @mulAdd(V, xv, w3, a3);
+    }
+
+    out[0..4].* = a0;
+    out[4..8].* = a1;
+    out[8..12].* = a2;
+    out[12..16].* = a3;
 }
 
 fn rmsNormFwd(x: []const f32, out: []f32) f32 {
@@ -1095,6 +1188,7 @@ fn rmsNormBackward(
     }
 }
 fn rmsNormInfer(x: []const f32, out: []f32) void {
+    @setRuntimeSafety(false);
     const v: Vec = x[0..N_EMBED].*;
     const squared = v * v;
 
@@ -1188,9 +1282,16 @@ fn sampleLogits(logits: []f32, n: usize, npad: usize, inv_t: f32) usize {
 
     var sum: f32 = 0.0;
 
-    for (0..npad) |i| {
-        p[i] = std.math.exp(logits[i] * inv_t - mx);
-        sum += p[i];
+    var i_exp: usize = 0;
+    while (i_exp + 4 <= npad) : (i_exp += 4) {
+        const lv: Vec4 = logits[i_exp..][0..4].*;
+        const ev = fastExp4(lv * @as(Vec4, @splat(inv_t)) - @as(Vec4, @splat(mx)));
+        p[i_exp..][0..4].* = ev;
+        sum += @reduce(.Add, ev);
+    }
+    while (i_exp < npad) : (i_exp += 1) {
+        p[i_exp] = std.math.exp(logits[i_exp] * inv_t - mx);
+        sum += p[i_exp];
     }
 
     // Remove the contribution from the artificial padded entries.

@@ -491,6 +491,7 @@ fn gptForward(
 }
 fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
     @setRuntimeSafety(false);
+    @setFloatMode(.optimized);
     var x: [N_EMBED]f32 = undefined;
     var xn: [N_EMBED]f32 = undefined;
     var xin: [N_EMBED]f32 = undefined;
@@ -603,14 +604,7 @@ fn gptForwardInfer(token_id: usize, pos_id: usize, logits_out: []f32) void {
         }
     }
 
-    mvPacked(
-        x[0..],
-        iw_lm[0..],
-        N_EMBED,
-        lm_pad_global,
-        lm_pad_global,
-        logits_out[0..lm_pad_global],
-    );
+    mvLm(x[0..], iw_lm[0..], lm_pad_global, logits_out[0..lm_pad_global]);
 }
 
 fn gptBackward(n: usize, tokens: []const usize, targets: []const usize) void {
@@ -1008,6 +1002,7 @@ fn dot4(x: []const f32, y: []const f32) f32 {
 }
 fn mv16Blk16(x: []const f32, wcol: []const f32, ldw: usize, out: []f32) void {
     @setRuntimeSafety(false);
+    @setFloatMode(.optimized);
     const V = @Vector(4, f32);
     var a0: V = @splat(0.0);
     var a1: V = @splat(0.0);
@@ -1056,6 +1051,7 @@ fn mvPackedSimd(
     out: []f32,
 ) void {
     @setRuntimeSafety(false);
+    @setFloatMode(.optimized);
     const V = @Vector(4, f32);
     var r: usize = 0;
 
@@ -1093,6 +1089,7 @@ fn mvFc1(
     out: []f32,
 ) void {
     @setRuntimeSafety(false);
+    @setFloatMode(.optimized);
     const V = @Vector(4, f32);
 
     for (0..MLP_DIM / 16) |block| {
@@ -1129,29 +1126,62 @@ fn mvFc2(
     out: []f32,
 ) void {
     @setRuntimeSafety(false);
+    @setFloatMode(.optimized);
     const V = @Vector(4, f32);
     var a0: V = @splat(0.0);
     var a1: V = @splat(0.0);
     var a2: V = @splat(0.0);
     var a3: V = @splat(0.0);
 
-    inline for (0..MLP_DIM) |c| {
-        const xv: V = @splat(x[c]);
-        const base = c * N_EMBED;
-        const w0: V = .{ w[base], w[base + 1], w[base + 2], w[base + 3] };
-        const w1: V = .{ w[base + 4], w[base + 5], w[base + 6], w[base + 7] };
-        const w2: V = .{ w[base + 8], w[base + 9], w[base + 10], w[base + 11] };
-        const w3: V = .{ w[base + 12], w[base + 13], w[base + 14], w[base + 15] };
-        a0 = @mulAdd(V, xv, w0, a0);
-        a1 = @mulAdd(V, xv, w1, a1);
-        a2 = @mulAdd(V, xv, w2, a2);
-        a3 = @mulAdd(V, xv, w3, a3);
+    inline for (0..MLP_DIM / 4) |block| {
+        const c = block * 4;
+        const w0: V = .{ w[c * N_EMBED], w[c * N_EMBED + 1], w[c * N_EMBED + 2], w[c * N_EMBED + 3] };
+        const w1: V = .{ w[(c + 1) * N_EMBED], w[(c + 1) * N_EMBED + 1], w[(c + 1) * N_EMBED + 2], w[(c + 1) * N_EMBED + 3] };
+        const w2: V = .{ w[(c + 2) * N_EMBED], w[(c + 2) * N_EMBED + 1], w[(c + 2) * N_EMBED + 2], w[(c + 2) * N_EMBED + 3] };
+        const w3: V = .{ w[(c + 3) * N_EMBED], w[(c + 3) * N_EMBED + 1], w[(c + 3) * N_EMBED + 2], w[(c + 3) * N_EMBED + 3] };
+        a0 = @mulAdd(V, w0, @splat(x[c]), a0);
+        a1 = @mulAdd(V, w1, @splat(x[c + 1]), a1);
+        a2 = @mulAdd(V, w2, @splat(x[c + 2]), a2);
+        a3 = @mulAdd(V, w3, @splat(x[c + 3]), a3);
     }
 
     out[0..4].* = a0;
     out[4..8].* = a1;
     out[8..12].* = a2;
     out[12..16].* = a3;
+}
+
+fn mvLm(
+    x: []const f32,
+    w: []const f32,
+    nout: usize,
+    out: []f32,
+) void {
+    @setRuntimeSafety(false);
+    const V = @Vector(4, f32);
+    var r: usize = 0;
+
+    while (r + 4 <= nout) : (r += 4) {
+        var acc: V = @splat(0.0);
+        inline for (0..N_EMBED) |c| {
+            const wv: V = .{
+                w[c * nout + r],
+                w[c * nout + r + 1],
+                w[c * nout + r + 2],
+                w[c * nout + r + 3],
+            };
+            acc = @mulAdd(V, @splat(x[c]), wv, acc);
+        }
+        out[r..][0..4].* = acc;
+    }
+
+    while (r < nout) : (r += 1) {
+        var sum: f32 = 0.0;
+        inline for (0..N_EMBED) |c| {
+            sum = @mulAdd(f32, x[c], w[c * nout + r], sum);
+        }
+        out[r] = sum;
+    }
 }
 
 fn rmsNormFwd(x: []const f32, out: []f32) f32 {
@@ -1201,13 +1231,10 @@ fn rmsNormInfer(x: []const f32, out: []f32) void {
     out[0..N_EMBED].* = result;
 }
 fn rmsNormScale(x: []const f32) f32 {
-    var sum: f32 = 0.0;
-
-    for (x) |value| {
-        sum += value * value;
-    }
-
-    const mean = sum / @as(f32, @floatFromInt(x.len));
+    @setRuntimeSafety(false);
+    const v: Vec = x[0..N_EMBED].*;
+    const sum: f32 = @reduce(.Add, v * v);
+    const mean = sum / @as(f32, @floatFromInt(N_EMBED));
     return 1.0 / @sqrt(mean + 1e-5);
 }
 

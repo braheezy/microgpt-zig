@@ -1009,17 +1009,20 @@ fn mv16Blk16(x: []const f32, wcol: []const f32, ldw: usize, out: []f32) void {
     var a2: V = @splat(0.0);
     var a3: V = @splat(0.0);
 
-    inline for (0..N_EMBED) |c| {
-        const xv: V = @splat(x[c]);
-        const base = c * ldw;
-        const w0: V = .{ wcol[base], wcol[base + 1], wcol[base + 2], wcol[base + 3] };
-        const w1: V = .{ wcol[base + 4], wcol[base + 5], wcol[base + 6], wcol[base + 7] };
-        const w2: V = .{ wcol[base + 8], wcol[base + 9], wcol[base + 10], wcol[base + 11] };
-        const w3: V = .{ wcol[base + 12], wcol[base + 13], wcol[base + 14], wcol[base + 15] };
-        a0 = @mulAdd(V, xv, w0, a0);
-        a1 = @mulAdd(V, xv, w1, a1);
-        a2 = @mulAdd(V, xv, w2, a2);
-        a3 = @mulAdd(V, xv, w3, a3);
+    inline for (0..N_EMBED / 4) |input_block| {
+        const c = input_block * 4;
+        const b0 = c * ldw;
+        const b1 = (c + 1) * ldw;
+        const b2 = (c + 2) * ldw;
+        const b3 = (c + 3) * ldw;
+        const w0: V = .{ wcol[b0], wcol[b0 + 1], wcol[b0 + 2], wcol[b0 + 3] };
+        const w1: V = .{ wcol[b1], wcol[b1 + 1], wcol[b1 + 2], wcol[b1 + 3] };
+        const w2: V = .{ wcol[b2], wcol[b2 + 1], wcol[b2 + 2], wcol[b2 + 3] };
+        const w3: V = .{ wcol[b3], wcol[b3 + 1], wcol[b3 + 2], wcol[b3 + 3] };
+        a0 = @mulAdd(V, @splat(x[c]), w0, a0);
+        a1 = @mulAdd(V, @splat(x[c + 1]), w1, a1);
+        a2 = @mulAdd(V, @splat(x[c + 2]), w2, a2);
+        a3 = @mulAdd(V, @splat(x[c + 3]), w3, a3);
     }
 
     out[0..4].* = a0;

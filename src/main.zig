@@ -1099,17 +1099,20 @@ fn mvFc1(
         var a3: V = @splat(0.0);
         const block_base = block * 256;
 
-        inline for (0..N_EMBED) |c| {
-            const xv: V = @splat(x[c]);
-            const base = block_base + c * 16;
-            const w0: V = .{ w[base], w[base + 1], w[base + 2], w[base + 3] };
-            const w1: V = .{ w[base + 4], w[base + 5], w[base + 6], w[base + 7] };
-            const w2: V = .{ w[base + 8], w[base + 9], w[base + 10], w[base + 11] };
-            const w3: V = .{ w[base + 12], w[base + 13], w[base + 14], w[base + 15] };
-            a0 = @mulAdd(V, xv, w0, a0);
-            a1 = @mulAdd(V, xv, w1, a1);
-            a2 = @mulAdd(V, xv, w2, a2);
-            a3 = @mulAdd(V, xv, w3, a3);
+        inline for (0..N_EMBED / 4) |input_block| {
+            const c = input_block * 4;
+            const b0 = block_base + c * 16;
+            const b1 = b0 + 16;
+            const b2 = b1 + 16;
+            const b3 = b2 + 16;
+            const w0: V = .{ w[b0], w[b0 + 1], w[b0 + 2], w[b0 + 3] };
+            const w1: V = .{ w[b1], w[b1 + 1], w[b1 + 2], w[b1 + 3] };
+            const w2: V = .{ w[b2], w[b2 + 1], w[b2 + 2], w[b2 + 3] };
+            const w3: V = .{ w[b3], w[b3 + 1], w[b3 + 2], w[b3 + 3] };
+            a0 = @mulAdd(V, @splat(x[c]), w0, a0);
+            a1 = @mulAdd(V, @splat(x[c + 1]), w1, a1);
+            a2 = @mulAdd(V, @splat(x[c + 2]), w2, a2);
+            a3 = @mulAdd(V, @splat(x[c + 3]), w3, a3);
         }
 
         const dst = block * 16;

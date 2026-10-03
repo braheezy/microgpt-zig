@@ -239,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
 
     for (0..10) |si| {
         var token_id = BOS;
-        var buf: [BLOCK_SIZE + 1]u8 = [_]u8{0} ** (BLOCK_SIZE + 1);
+        var buf: [BLOCK_SIZE + 1]u8 = @splat(0);
         var len: usize = 0;
         var pos: usize = 0;
         while (pos < BLOCK_SIZE) : (pos += 1) {
@@ -366,7 +366,7 @@ fn buildPretok(allocator: Allocator) !void {
     }
 }
 fn buildTokenizer() void {
-    var seen: [256]bool = [_]bool{false} ** 256;
+    var seen: [256]bool = @splat(false);
     for (docs[0..num_docs]) |doc| {
         var i: usize = 0;
         while (doc[i] != 0) : (i += 1) {
